@@ -1,0 +1,547 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=3cm, right=2.5cm, headheight=15pt}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    urlcolor=blue!70!black,
+    citecolor=blue!70!black
+}
+
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+\definecolor{codecomment}{rgb}{0.4,0.4,0.4}
+\definecolor{codestring}{rgb}{0.13,0.54,0.13}
+\definecolor{codekeyword}{rgb}{0.0,0.0,0.8}
+
+\lstset{
+    backgroundcolor=\color{codegray},
+    commentstyle=\color{codecomment}\itshape,
+    keywordstyle=\color{codekeyword}\bfseries,
+    stringstyle=\color{codestring},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    keepspaces=true,
+    numbers=left,
+    numbersep=8pt,
+    numberstyle=\tiny\color{codecomment},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=single,
+    framerule=0.4pt,
+    rulecolor=\color{gray!40}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Home Credit Default Risk}
+\fancyhead[R]{\small Valvitor Santos}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{
+    \vspace{-1cm}
+    {\Large \textbf{Home Credit Default Risk}} \\[0.5em]
+    {\large Relat\'orio T\'ecnico --- Pipeline de Machine Learning\\
+    para Predi\c{c}\~ao de Inadimpl\^encia}
+}
+\author{Valvitor Santos}
+\date{\today}
+
+% ──────────────────────────────────────────────────────────────
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\small\textbf{Resumo.}
+Este relat\'orio descreve o desenvolvimento de um pipeline completo de machine learning
+para a competi\c{c}\~ao \textit{Home Credit Default Risk} do Kaggle. O problema consiste em
+prever a probabilidade de inadimpl\^encia de clientes de cr\'edito com hist\'orico
+financeiro limitado. A solu\c{c}\~ao emprega engenharia de features sobre sete tabelas
+relacionais, modelo LightGBM com otimiza\c{c}\~ao de hiperpar\^ametros via Optuna e
+valida\c{c}\~ao cruzada estratificada em 5 folds. A m\'etrica de avalia\c{c}\~ao \'e
+a \textbf{AUC-ROC}.
+\end{minipage}
+\end{center}
+
+\bigskip
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════
+\section{Introdu\c{c}\~ao e Contexto do Problema}
+
+\subsection{Motiva\c{c}\~ao}
+
+Institui\c{c}\~oes financeiras enfrentam o desafio de avaliar a capacidade de pagamento
+de clientes com pouco ou nenhum hist\'orico de cr\'edito formal. A aus\^encia de dados
+hist\'oricos em bureaus de cr\'edito convencionais leva \`a exclus\~ao financeira de
+popula\c{c}\~oes que, de fato, s\~ao capazes de honrar seus compromissos. O Home Credit,
+organiza\c{c}\~ao especializada em cr\'edito respons\'avel, busca usar fontes de dados
+alternativas para tornar essa avalia\c{c}\~ao mais justa e precisa.
+
+\subsection{Formula\c{c}\~ao do Problema}
+
+O objetivo \'e construir um modelo de \textbf{classifica\c{c}\~ao bin\'aria} que, dado
+o perfil de um solicitante, estime a probabilidade de inadimpl\^encia:
+
+\begin{equation}
+    \hat{p}_i = P(\text{TARGET}_i = 1 \mid \mathbf{x}_i)
+\end{equation}
+
+onde $\text{TARGET}_i = 1$ indica que o cliente $i$ n\~ao pagou o empr\'estimo, e
+$\mathbf{x}_i$ \'e o vetor de features do cliente.
+
+A m\'etrica de avalia\c{c}\~ao oficial \'e a \textbf{AUC-ROC} (\'Area sob a Curva ROC),
+que mede a capacidade do modelo de separar inadimplentes de adimplentes,
+independentemente do threshold de classifica\c{c}\~ao:
+
+\begin{equation}
+    \text{AUC} = \int_0^1 \text{TPR}\!\left(\text{FPR}^{-1}(t)\right) dt
+\end{equation}
+
+\subsection{Desafios Principais}
+
+\begin{itemize}
+    \item \textbf{Desbalanceamento de classes:} aproximadamente 8\% dos contratos resultam
+          em inadimpl\^encia, criando forte vi\'es em favor da classe majorit\'aria.
+    \item \textbf{Dados distribu\'idos em m\'ultiplas tabelas:} informa\c{c}\~oes relevantes
+          est\~ao fragmentadas em 7 tabelas relacionais que precisam ser agregadas ao n\'ivel
+          do solicitante.
+    \item \textbf{Alta propor\c{c}\~ao de valores ausentes:} algumas features possuem at\'e
+          60\% de nulos, exigindo tratamento cuidadoso.
+    \item \textbf{Engenharia de features cr\'itica:} a performance depende fortemente das
+          features derivadas, especialmente das tabelas auxiliares.
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{Conjunto de Dados}
+
+\subsection{Estrutura Relacional}
+
+Os dados s\~ao fornecidos em 7 arquivos CSV com a seguinte hierarquia:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llrl}
+\toprule
+\textbf{Tabela} & \textbf{Chave} & \textbf{Linhas} & \textbf{Descri\c{c}\~ao} \\
+\midrule
+\texttt{application\_train/test} & \texttt{SK\_ID\_CURR} & 307.511 / 48.744 & Dados da solicita\c{c}\~ao atual \\
+\texttt{bureau}                  & \texttt{SK\_ID\_CURR} & 1.716.428        & Cr\'editos em outros bancos \\
+\texttt{bureau\_balance}         & \texttt{SK\_ID\_BUREAU}& 27.299.925      & Hist\'orico mensal do bureau \\
+\texttt{previous\_application}   & \texttt{SK\_ID\_CURR} & 1.670.214        & Solicita\c{c}\~oes anteriores \\
+\texttt{POS\_CASH\_balance}      & \texttt{SK\_ID\_CURR} & 10.001.358       & Saldos POS e empr\'estimos \\
+\texttt{installments\_payments}  & \texttt{SK\_ID\_CURR} & 13.605.401       & Hist\'orico de parcelas \\
+\texttt{credit\_card\_balance}   & \texttt{SK\_ID\_CURR} & 3.840.312        & Saldos de cart\~ao de cr\'edito \\
+\bottomrule
+\end{tabular}
+\caption{Estrutura do conjunto de dados}
+\end{table}
+
+A tabela principal \'e a \^ancora do modelo; todas as demais s\~ao agregadas ao n\'ivel
+\texttt{SK\_ID\_CURR} e unidas via \texttt{left join}.
+
+\subsection{Vari\'avel Alvo}
+
+\begin{itemize}
+    \item $\texttt{TARGET} = 0$: cliente pagou normalmente (91,93\%)
+    \item $\texttt{TARGET} = 1$: cliente inadimpliu (8,07\%)
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{An\'alise Explorat\'oria de Dados}
+
+A EDA foi conduzida no notebook \texttt{01\_EDA.ipynb} com o objetivo de extrair insights
+acion\'aveis --- n\~ao apenas estat\'isticas descritivas, mas decis\~oes de
+pr\'e-processamento e engenharia de features diretamente informadas pelos dados.
+
+\subsection{Anomalia em \texttt{DAYS\_EMPLOYED}}
+
+A vari\'avel \texttt{DAYS\_EMPLOYED} representa h\'a quantos dias o cliente est\'a
+empregado. Por\'em, 18.148 clientes apresentam o valor \textbf{365.243} --- um
+placeholder para ``n\~ao empregado'', equivalente a $\approx$ 1000 anos de emprego.
+
+\textbf{Decis\~ao:} substituir 365.243 por \texttt{NaN} e criar uma feature bin\'aria
+\texttt{FLAG\_EMPLOYED\_ANOMALY} para preservar a informa\c{c}\~ao de que o dado estava
+ausente.
+
+\begin{lstlisting}[language=Python, caption={Tratamento da anomalia em DAYS\_EMPLOYED}]
+df['FLAG_EMPLOYED_ANOMALY'] = (df['DAYS_EMPLOYED'] == 365243).astype(np.int8)
+df['DAYS_EMPLOYED'] = df['DAYS_EMPLOYED'].replace(365243, np.nan)
+\end{lstlisting}
+
+\subsection{Features \texttt{EXT\_SOURCE}}
+
+As vari\'aveis \texttt{EXT\_SOURCE\_1}, \texttt{EXT\_SOURCE\_2} e \texttt{EXT\_SOURCE\_3}
+representam scores externos de cr\'edito provenientes de bureaus terceiros. A EDA revelou
+que estas s\~ao as \textbf{features mais correlacionadas com a inadimpl\^encia} de todo
+o dataset, tornando-as candidatas priorit\'arias para combina\c{c}\~oes n\~ao-lineares.
+
+\texttt{EXT\_SOURCE\_1} possui 56\% de valores ausentes, exigindo a cria\c{c}\~ao de uma
+flag adicional: \texttt{FLAG\_EXT\_SOURCE\_1\_MISSING}.
+
+\subsection{Bloco Imobili\'ario}
+
+Aproximadamente 20 vari\'aveis relacionadas ao im\'ovel do cliente (\texttt{APARTMENTS\_AVG},
+\texttt{BASEMENTAREA\_AVG}, etc.) apresentam mais de 60\% de nulos e baixa correla\c{c}\~ao
+com o target.
+
+\textbf{Decis\~ao:} remover todas as colunas com mais de 60\% de valores ausentes,
+exceto \texttt{EXT\_SOURCE}.
+
+\subsection{Desbalanceamento de Classes}
+
+Com 8,07\% de inadimpl\^encia, modelos n\~ao ajustados tendem a classificar quase todos
+os clientes como adimplentes. \textbf{Decis\~ao:} usar \texttt{scale\_pos\_weight} no
+LightGBM:
+
+\begin{equation}
+    \texttt{scale\_pos\_weight} = \frac{N_{\text{negativos}}}{N_{\text{positivos}}}
+    = \frac{283{.}301}{24{.}210} \approx 11{,}70
+\end{equation}
+
+% ══════════════════════════════════════════════════════════════
+\section{Engenharia de Features}
+
+\subsection{Vis\~ao Geral}
+
+A engenharia de features foi executada no notebook \texttt{02\_feature\_engineering.ipynb},
+transformando as 7 tabelas brutas em um \'unico dataset processado com mais de 1.000
+features. O processo segue quatro etapas:
+
+\begin{enumerate}
+    \item Features manuais na tabela principal
+    \item Agrega\c{c}\~ao do bureau e bureau\_balance
+    \item Agrega\c{c}\~ao das tabelas auxiliares (previous, POS, installments, credit card)
+    \item Merge final, One-Hot Encoding e alinhamento
+\end{enumerate}
+
+\subsection{Features da Tabela Principal}
+
+\subsubsection{Features Financeiras}
+
+Raz\~oes financeiras que capturam a rela\c{c}\~ao entre cr\'edito, renda e parcelas:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Feature} & \textbf{F\'ormula} \\
+\midrule
+\texttt{CREDIT\_INCOME\_RATIO}  & $\texttt{AMT\_CREDIT} / (\texttt{AMT\_INCOME\_TOTAL} + 1)$ \\
+\texttt{ANNUITY\_INCOME\_RATIO} & $\texttt{AMT\_ANNUITY} / (\texttt{AMT\_INCOME\_TOTAL} + 1)$ \\
+\texttt{ANNUITY\_CREDIT\_RATIO} & $\texttt{AMT\_ANNUITY} / (\texttt{AMT\_CREDIT} + 1)$ \\
+\texttt{INCOME\_PER\_PERSON}    & $\texttt{AMT\_INCOME\_TOTAL} / (\texttt{CNT\_FAM\_MEMBERS} + 1)$ \\
+\texttt{GOODS\_CREDIT\_RATIO}   & $\texttt{AMT\_GOODS\_PRICE} / (\texttt{AMT\_CREDIT} + 1)$ \\
+\bottomrule
+\end{tabular}
+\caption{Features financeiras criadas}
+\end{table}
+
+O ac\'rescimo de 1 no denominador evita divis\~ao por zero sem distorcer valores
+para denominadores grandes.
+
+\subsubsection{Features Temporais}
+
+\begin{itemize}
+    \item \texttt{DAYS\_BIRTH\_YEARS}: idade em anos (mais interpret\'avel que dias negativos)
+    \item \texttt{DAYS\_EMPLOYED\_YEARS}: tempo de emprego em anos
+    \item \texttt{EMPLOYED\_TO\_BIRTH\_RATIO}: fra\c{c}\~ao da vida trabalhada
+    \item \texttt{EMPLOYED\_TO\_AGE\_PCT}: propor\c{c}\~ao tempo de emprego / idade
+\end{itemize}
+
+\subsubsection{Combina\c{c}\~oes de \texttt{EXT\_SOURCE}}
+
+Dado o alto poder preditivo dos scores externos, foram criadas m\'ultiplas combina\c{c}\~oes:
+
+\begin{align}
+    \texttt{EXT\_SOURCE\_MEAN} &= \tfrac{1}{3}(E_1 + E_2 + E_3) \\
+    \texttt{EXT\_SOURCE\_STD}  &= \text{std}(E_1, E_2, E_3) \\
+    \texttt{EXT\_SOURCE\_PROD} &= E_1 \cdot E_2 \cdot E_3 \\
+    \texttt{EXT12} &= E_1 \cdot E_2, \quad
+    \texttt{EXT13} = E_1 \cdot E_3, \quad
+    \texttt{EXT23} = E_2 \cdot E_3
+\end{align}
+
+O produto captura intera\c{c}\~oes n\~ao-lineares: um score baixo em qualquer fonte
+colapsa o produto, sinalizando risco concentrado.
+
+\subsection{Agrega\c{c}\~ao das Tabelas Auxiliares}
+
+Para cada tabela auxiliar, o processo \'e:
+
+\begin{enumerate}
+    \item Criar features manuais espec\'ificas para o dom\'inio da tabela
+    \item Aplicar agrega\c{c}\~oes estat\'isticas para colunas num\'ericas:
+          \texttt{count}, \texttt{mean}, \texttt{max}, \texttt{min}, \texttt{sum}
+    \item Aplicar One-Hot Encoding + agrega\c{c}\~ao para colunas categ\'oricas:
+          \texttt{sum}, \texttt{mean}
+    \item Fazer \texttt{left join} ao n\'ivel \texttt{SK\_ID\_CURR}
+\end{enumerate}
+
+Este processo \'e implementado nas fun\c{c}\~oes reutiliz\'aveis
+\texttt{agg\_numeric()} e \texttt{agg\_categorical()} em \texttt{src/features.py}.
+
+\subsubsection{Bureau e Bureau Balance}
+
+O \texttt{bureau\_balance} fornece o hist\'orico mensal de cada cr\'edito. As colunas
+de status foram binarizadas:
+
+\begin{lstlisting}[language=Python, caption={Engenharia de features no bureau\_balance}]
+# C = pago, X = sem divida, 1-5 = meses de atraso crescente
+bureau_balance['STATUS_GOOD'] = bureau_balance['STATUS'].isin(['C','X']).astype(np.int8)
+bureau_balance['STATUS_LATE'] = bureau_balance['STATUS'].isin(['1','2','3','4','5']).astype(np.int8)
+\end{lstlisting}
+
+\subsubsection{Parcelas (\texttt{installments\_payments})}
+
+\begin{itemize}
+    \item \texttt{PAYMENT\_DIFF}: valor pago $-$ valor devido (positivo = pagou mais que o m\'inimo)
+    \item \texttt{PAYMENT\_RATIO}: raz\~ao entre pago e devido
+    \item \texttt{DAYS\_PAST\_DUE}: dias de atraso (zerado para pagamentos antecipados)
+    \item \texttt{PAID\_ON\_TIME}: flag bin\'aria de pontualidade
+\end{itemize}
+
+\subsubsection{Cart\~ao de Cr\'edito (\texttt{credit\_card\_balance})}
+
+\begin{equation}
+    \texttt{UTILIZATION} = \frac{\texttt{AMT\_BALANCE}}{\texttt{AMT\_CREDIT\_LIMIT\_ACTUAL} + 1}
+\end{equation}
+
+Alta utiliza\c{c}\~ao do limite \'e um forte indicador de estresse financeiro.
+
+\subsubsection{Aplica\c{c}\~oes Anteriores (\texttt{previous\_application})}
+
+\begin{itemize}
+    \item \texttt{APP\_CREDIT\_RATIO}: raz\~ao entre valor solicitado e aprovado ---
+          captura se o cliente tipicamente pede mais do que recebe
+    \item \texttt{DAYS\_DECISION\_YEARS}: tempo desde a \'ultima decis\~ao de cr\'edito
+\end{itemize}
+
+\subsection{Processamento Final}
+
+Ap\'os o merge de todas as tabelas:
+
+\begin{enumerate}
+    \item Remo\c{c}\~ao de colunas com \textbf{mais de 80\% de nulos} p\'os-merge
+    \item \textbf{One-Hot Encoding} para vari\'aveis categ\'oricas com menos de 10
+          categorias \'unicas
+    \item \textbf{Alinhamento} entre train e test: colunas ausentes no test s\~ao
+          preenchidas com 0
+    \item \textbf{Sanitiza\c{c}\~ao} de nomes de colunas: caracteres especiais
+          substitu\'idos por \texttt{\_} (compatibilidade com LightGBM)
+    \item Salvamento em \textbf{formato Parquet} (columnar, comprimido)
+\end{enumerate}
+
+O resultado final \'e um dataset com \textbf{1.042 features} e 307.511 linhas de treino.
+
+% ══════════════════════════════════════════════════════════════
+\section{Modelagem}
+
+\subsection{Escolha do Algoritmo}
+
+O \textbf{LightGBM} (Light Gradient Boosting Machine) foi escolhido pelos seguintes motivos:
+
+\begin{itemize}
+    \item \textbf{Efici\^encia com alta dimensionalidade:} os algoritmos GOSS e EFB
+          permitem treinar rapidamente com mais de 1.000 features
+    \item \textbf{Robustez a valores ausentes:} lida nativamente com NaN, aprendendo
+          a melhor dire\c{c}\~ao de divis\~ao para dados ausentes
+    \item \textbf{Performance em dados tabulares:} boosting de \'arvores \'e
+          historicamente superior a redes neurais em dados tabulares com features
+          de dom\'inio
+    \item \textbf{Suporte a desbalanceamento:} par\^ametro \texttt{scale\_pos\_weight}
+          ajusta o peso da classe minorit\'aria no c\'alculo do gradiente
+\end{itemize}
+
+\subsection{Otimiza\c{c}\~ao de Hiperpar\^ametros com Optuna}
+
+O Optuna implementa o \textbf{TPE} (\textit{Tree-structured Parzen Estimator}), um
+m\'etodo de otimiza\c{c}\~ao bayesiana que constr\'oi um modelo probabil\'istico do
+espa\c{c}o de hiperpar\^ametros e sugere configura\c{c}\~oes com maior probabilidade
+de melhoria.
+
+O processo de tuning utilizou:
+\begin{itemize}
+    \item 20 \textit{trials}, cada um avaliado com 3-fold CV
+    \item M\'etrica objetivo: AUC-ROC m\'edio dos 3 folds
+    \item Early stopping de 30 rodadas por fold para acelerar a busca
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Hiperpar\^ametro} & \textbf{Espa\c{c}o de Busca} & \textbf{Tipo} \\
+\midrule
+\texttt{learning\_rate}       & $[0.02,\; 0.15]$          & log-uniform \\
+\texttt{num\_leaves}          & $[20,\; 200]$             & inteiro \\
+\texttt{max\_depth}           & $[4,\; 10]$               & inteiro \\
+\texttt{min\_child\_samples}  & $[20,\; 300]$             & inteiro \\
+\texttt{feature\_fraction}    & $[0.4,\; 0.9]$            & uniforme \\
+\texttt{bagging\_fraction}    & $[0.4,\; 0.9]$            & uniforme \\
+\texttt{bagging\_freq}        & $[1,\; 7]$                & inteiro \\
+\texttt{reg\_alpha}           & $[10^{-4},\; 5.0]$        & log-uniform \\
+\texttt{reg\_lambda}          & $[10^{-4},\; 5.0]$        & log-uniform \\
+\bottomrule
+\end{tabular}
+\caption{Espa\c{c}o de busca do Optuna}
+\end{table}
+
+\subsection{Treinamento Final com 5-Fold CV}
+
+Ap\'os identificar os melhores hiperpar\^ametros, o modelo final \'e treinado com
+\textbf{StratifiedKFold} de 5 folds, que garante a preserva\c{c}\~ao da propor\c{c}\~ao
+de inadimpl\^encia em cada fold:
+
+\begin{lstlisting}[language=Python, caption={Treinamento com valida\c{c}\~ao cruzada estratificada}]
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+oof_preds  = np.zeros(len(X))
+test_preds = np.zeros(len(X_test))
+
+for fold, (tr_idx, val_idx) in enumerate(skf.split(X, y)):
+    model = lgb.LGBMClassifier(**BEST_PARAMS)
+    model.fit(X.iloc[tr_idx], y.iloc[tr_idx],
+              eval_set=[(X.iloc[val_idx], y.iloc[val_idx])],
+              callbacks=[lgb.early_stopping(100)])
+    oof_preds[val_idx]  = model.predict_proba(X.iloc[val_idx])[:, 1]
+    test_preds         += model.predict_proba(X_test)[:, 1] / 5
+\end{lstlisting}
+
+As predi\c{c}\~oes de teste s\~ao a \textbf{m\'edia} das 5 predi\c{c}\~oes, reduzindo
+vari\^ancia.
+
+\subsection{M\'etrica OOF vs.\ M\'edia dos Folds}
+
+O \textbf{AUC OOF} (Out-of-Fold) \'e calculado concatenando todas as predi\c{c}\~oes
+out-of-fold e computando o AUC sobre o dataset completo:
+
+\begin{equation}
+    \text{AUC}_{\text{OOF}} = \text{AUC}\!\left(\mathbf{y}_{\text{train}},\;
+    \hat{\mathbf{p}}_{\text{OOF}}\right)
+\end{equation}
+
+Isso \'e diferente da m\'edia das AUCs por fold:
+
+\begin{equation}
+    \overline{\text{AUC}}_{\text{folds}} = \frac{1}{K}
+    \sum_{k=1}^{K} \text{AUC}\!\left(\mathbf{y}^{(k)}_{\text{val}},\;
+    \hat{\mathbf{p}}^{(k)}_{\text{val}}\right)
+\end{equation}
+
+A AUC OOF \'e mais confi\'avel pois avalia o \textbf{ranking global} de todas as
+predi\c{c}\~oes juntas. Folds individuais podem ter AUC mais alta por dados
+estatisticamente mais sep\'araveis --- o OOF corrige esse vi\'es.
+
+\subsection{Tracking com MLflow}
+
+Todos os experimentos s\~ao registrados no MLflow:
+\begin{itemize}
+    \item Hiperpar\^ametros do melhor trial do Optuna
+    \item AUC OOF final e AUC por fold
+    \item N\'umero de features utilizadas
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{Boas Pr\'aticas e Reprodutibilidade}
+
+\subsection{Estrutura de C\'odigo}
+
+A separa\c{c}\~ao entre notebooks e c\'odigo reutiliz\'avel (\texttt{src/features.py})
+evita duplica\c{c}\~ao. As fun\c{c}\~oes \texttt{agg\_numeric()} e
+\texttt{agg\_categorical()} s\~ao gen\'ericas e funcionam para qualquer tabela,
+recebendo apenas o DataFrame, a chave prim\'aria e o prefixo desejado.
+
+\subsection{Gerenciamento de Mem\'oria}
+
+Com datasets de dezenas de milh\~oes de linhas, o uso de mem\'oria \'e cr\'itico:
+
+\begin{itemize}
+    \item \textbf{Downcast de tipos:} inteiros e floats convertidos para o menor tipo
+          que comporta seus valores (\texttt{int8}, \texttt{int16}, \texttt{float32})
+    \item \textbf{Libera\c{c}\~ao expl\'icita:} ap\'os cada tabela auxiliar, o objeto
+          \'e deletado e \texttt{gc.collect()} \'e chamado
+    \item \textbf{Parquet:} armazenamento intermedi\'ario columnar e comprimido
+\end{itemize}
+
+\subsection{Preven\c{c}\~ao de Data Leakage}
+
+O alinhamento de colunas entre train e test \'e feito via
+\texttt{pd.DataFrame.align(join=`left')} para garantir que o test nunca possua features
+derivadas de informa\c{c}\~oes do target. O Target Encoding, quando aplicado, usa
+K-Fold para evitar vaza\c{c}\~ao.
+
+% ══════════════════════════════════════════════════════════════
+\section{Conclus\~ao e Pr\'oximos Passos}
+
+\subsection{Conclus\~ao}
+
+Este projeto implementa um pipeline end-to-end robusto para predi\c{c}\~ao de
+inadimpl\^encia. Os pontos t\'ecnicos principais s\~ao:
+
+\begin{enumerate}
+    \item EDA orientada a decis\~oes, n\~ao apenas descritiva
+    \item Engenharia de features fundamentada em dom\'inio financeiro
+    \item Valida\c{c}\~ao cruzada estratificada para lidar com desbalanceamento
+    \item Otimiza\c{c}\~ao bayesiana de hiperpar\^ametros com Optuna
+    \item Tracking completo de experimentos com MLflow
+\end{enumerate}
+
+\subsection{Pr\'oximos Passos}
+
+\begin{itemize}
+    \item \textbf{Stacking/Blending:} combinar LightGBM com XGBoost e CatBoost
+    \item \textbf{Target Encoding:} para vari\'aveis de alta cardinalidade como
+          \texttt{ORGANIZATION\_TYPE}
+    \item \textbf{SHAP values:} sele\c{c}\~ao de features baseada em importância de permuta\c{c}\~ao
+    \item \textbf{Pseudo-labeling:} usar predi\c{c}\~oes de alta confiança no test
+          para ampliar o treino
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\appendix
+\section{Depend\^encias}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Biblioteca} & \textbf{Vers\~ao} \\
+\midrule
+pandas      & 2.2.2  \\
+numpy       & 1.26.4 \\
+scikit-learn & 1.4.2 \\
+lightgbm    & 4.x    \\
+optuna      & 3.6.1  \\
+mlflow      & 2.11.3 \\
+pyarrow     & 15.0.2 \\
+matplotlib  & 3.8.4  \\
+seaborn     & 0.13.2 \\
+\bottomrule
+\end{tabular}
+\caption{Depend\^encias principais do projeto}
+\end{table}
+
+\end{document}

@@ -1,0 +1,38 @@
+# Dados (muito grandes para o repositório)
+data/
+*.csv
+*.parquet
+submission.csv
+
+# Ambiente virtual
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Credenciais
+.env
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# MLflow
+mlruns/
+
+# Modelos treinados
+models/
+
+# macOS
+.DS_Store
+
+# LaTeX auxiliares
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.synctex.gz
+
+# IDE
+.claude/
+.vscode/
