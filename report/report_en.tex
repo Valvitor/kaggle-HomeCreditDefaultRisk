@@ -1,0 +1,549 @@
+\documentclass[12pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+
+\geometry{top=2.5cm, bottom=2.5cm, left=3cm, right=2.5cm, headheight=15pt}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    urlcolor=blue!70!black,
+    citecolor=blue!70!black
+}
+
+\definecolor{codegray}{rgb}{0.95,0.95,0.95}
+\definecolor{codecomment}{rgb}{0.4,0.4,0.4}
+\definecolor{codestring}{rgb}{0.13,0.54,0.13}
+\definecolor{codekeyword}{rgb}{0.0,0.0,0.8}
+
+\lstset{
+    backgroundcolor=\color{codegray},
+    commentstyle=\color{codecomment}\itshape,
+    keywordstyle=\color{codekeyword}\bfseries,
+    stringstyle=\color{codestring},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    keepspaces=true,
+    numbers=left,
+    numbersep=8pt,
+    numberstyle=\tiny\color{codecomment},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=single,
+    framerule=0.4pt,
+    rulecolor=\color{gray!40}
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Home Credit Default Risk}
+\fancyhead[R]{\small Valvitor Santos}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\title{
+    \vspace{-1cm}
+    {\Large \textbf{Home Credit Default Risk}} \\[0.5em]
+    {\large Technical Report --- End-to-End Machine Learning Pipeline\\
+    for Loan Default Prediction}
+}
+\author{Valvitor Santos}
+\date{\today}
+
+% ──────────────────────────────────────────────────────────────
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+\begin{center}
+\begin{minipage}{0.85\textwidth}
+\small\textbf{Abstract.}
+This report describes the development of a complete machine learning pipeline for the
+\textit{Home Credit Default Risk} Kaggle competition. The problem consists of predicting
+the probability of loan default for clients who may have limited or no credit history.
+The solution employs feature engineering across seven relational tables, a LightGBM model
+with Optuna hyperparameter optimization, and 5-fold stratified cross-validation.
+Experiments are tracked with MLflow. The evaluation metric is \textbf{AUC-ROC}.
+\end{minipage}
+\end{center}
+
+\bigskip
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════
+\section{Introduction and Problem Context}
+
+\subsection{Motivation}
+
+Financial institutions face the challenge of assessing the repayment capacity of clients
+who have little or no formal credit history. The absence of historical data in conventional
+credit bureaus leads to the financial exclusion of populations that are, in fact, capable
+of honoring their commitments. Home Credit, an organization specialized in responsible
+lending, seeks to use alternative data sources to make this assessment fairer and more
+accurate.
+
+\subsection{Problem Formulation}
+
+The objective is to build a \textbf{binary classification} model that, given an
+applicant's profile, estimates the probability of default:
+
+\begin{equation}
+    \hat{p}_i = P(\text{TARGET}_i = 1 \mid \mathbf{x}_i)
+\end{equation}
+
+where $\text{TARGET}_i = 1$ indicates that client $i$ did not repay the loan, and
+$\mathbf{x}_i$ is the client's feature vector.
+
+The official evaluation metric is the \textbf{AUC-ROC} (Area Under the ROC Curve),
+which measures the model's ability to separate defaulters from non-defaulters regardless
+of the classification threshold:
+
+\begin{equation}
+    \text{AUC} = \int_0^1 \text{TPR}\!\left(\text{FPR}^{-1}(t)\right) dt
+\end{equation}
+
+\subsection{Main Challenges}
+
+\begin{itemize}
+    \item \textbf{Class imbalance:} approximately 8\% of contracts result in default,
+          creating strong bias toward the majority class.
+    \item \textbf{Data distributed across multiple tables:} relevant information is
+          fragmented across 7 relational tables that must be aggregated to the applicant
+          level.
+    \item \textbf{High proportion of missing values:} some features have up to 60\%
+          null values, requiring careful treatment.
+    \item \textbf{Critical feature engineering:} model performance depends heavily on
+          the quality of derived features, especially from auxiliary tables.
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{Dataset}
+
+\subsection{Relational Structure}
+
+The data is provided in 7 CSV files with the following hierarchy:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{llrl}
+\toprule
+\textbf{Table} & \textbf{Key} & \textbf{Rows} & \textbf{Description} \\
+\midrule
+\texttt{application\_train/test} & \texttt{SK\_ID\_CURR}   & 307,511 / 48,744 & Current loan application \\
+\texttt{bureau}                  & \texttt{SK\_ID\_CURR}   & 1,716,428        & Credit at other banks \\
+\texttt{bureau\_balance}         & \texttt{SK\_ID\_BUREAU} & 27,299,925       & Monthly bureau history \\
+\texttt{previous\_application}   & \texttt{SK\_ID\_CURR}   & 1,670,214        & Prior HC applications \\
+\texttt{POS\_CASH\_balance}      & \texttt{SK\_ID\_CURR}   & 10,001,358       & POS and cash loan balances \\
+\texttt{installments\_payments}  & \texttt{SK\_ID\_CURR}   & 13,605,401       & Repayment history \\
+\texttt{credit\_card\_balance}   & \texttt{SK\_ID\_CURR}   & 3,840,312        & Credit card balances \\
+\bottomrule
+\end{tabular}
+\caption{Dataset structure}
+\end{table}
+
+The main table is the model anchor; all others are aggregated to the \texttt{SK\_ID\_CURR}
+level and joined via \texttt{left join}.
+
+\subsection{Target Variable}
+
+\begin{itemize}
+    \item $\texttt{TARGET} = 0$: client repaid normally (91.93\%)
+    \item $\texttt{TARGET} = 1$: client defaulted (8.07\%)
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\section{Exploratory Data Analysis}
+
+The EDA was conducted in notebook \texttt{01\_EDA.ipynb} with the goal of extracting
+actionable insights --- not merely descriptive statistics, but pre-processing and feature
+engineering decisions directly informed by the data.
+
+\subsection{Anomaly in \texttt{DAYS\_EMPLOYED}}
+
+The variable \texttt{DAYS\_EMPLOYED} represents how many days a client has been employed
+(negative value). However, 18,148 clients show the value \textbf{365,243} --- clearly a
+placeholder for ``not employed'', equivalent to $\approx$ 1,000 years of employment.
+
+\textbf{Decision:} replace 365,243 with \texttt{NaN} and create a binary feature
+\texttt{FLAG\_EMPLOYED\_ANOMALY} to preserve the information that data was missing.
+
+\begin{lstlisting}[language=Python, caption={Handling the DAYS\_EMPLOYED anomaly}]
+df['FLAG_EMPLOYED_ANOMALY'] = (df['DAYS_EMPLOYED'] == 365243).astype(np.int8)
+df['DAYS_EMPLOYED'] = df['DAYS_EMPLOYED'].replace(365243, np.nan)
+\end{lstlisting}
+
+\subsection{EXT\_SOURCE Features}
+
+The variables \texttt{EXT\_SOURCE\_1}, \texttt{EXT\_SOURCE\_2}, and
+\texttt{EXT\_SOURCE\_3} represent external credit scores from third-party bureaus. EDA
+revealed these are the \textbf{most correlated features with default} in the entire
+dataset, making them priority candidates for non-linear combinations.
+
+\texttt{EXT\_SOURCE\_1} has 56\% missing values, requiring an additional flag:
+\texttt{FLAG\_EXT\_SOURCE\_1\_MISSING}.
+
+\subsection{Real Estate Block}
+
+Approximately 20 variables related to the client's property (\texttt{APARTMENTS\_AVG},
+\texttt{BASEMENTAREA\_AVG}, etc.) have more than 60\% null values and low correlation
+with the target.
+
+\textbf{Decision:} drop all columns with more than 60\% missing values, except
+\texttt{EXT\_SOURCE}.
+
+\subsection{Class Imbalance}
+
+With 8.07\% default rate, unadjusted models tend to classify almost all clients as
+non-defaulters. \textbf{Decision:} use LightGBM's \texttt{scale\_pos\_weight} parameter:
+
+\begin{equation}
+    \texttt{scale\_pos\_weight} = \frac{N_{\text{negatives}}}{N_{\text{positives}}}
+    = \frac{283{,}301}{24{,}210} \approx 11.70
+\end{equation}
+
+% ══════════════════════════════════════════════════════════════
+\section{Feature Engineering}
+
+\subsection{Overview}
+
+Feature engineering was executed in notebook \texttt{02\_feature\_engineering.ipynb},
+transforming 7 raw tables into a single processed dataset with over 1,000 features.
+The process follows four steps:
+
+\begin{enumerate}
+    \item Manual features on the main application table
+    \item Bureau and bureau\_balance aggregation
+    \item Auxiliary table aggregation (previous, POS, installments, credit card)
+    \item Final merge, One-Hot Encoding and alignment
+\end{enumerate}
+
+\subsection{Main Table Features}
+
+\subsubsection{Financial Ratios}
+
+Ratios capturing the relationship between credit, income, and installments:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Feature} & \textbf{Formula} \\
+\midrule
+\texttt{CREDIT\_INCOME\_RATIO}  & $\texttt{AMT\_CREDIT} / (\texttt{AMT\_INCOME\_TOTAL} + 1)$ \\
+\texttt{ANNUITY\_INCOME\_RATIO} & $\texttt{AMT\_ANNUITY} / (\texttt{AMT\_INCOME\_TOTAL} + 1)$ \\
+\texttt{ANNUITY\_CREDIT\_RATIO} & $\texttt{AMT\_ANNUITY} / (\texttt{AMT\_CREDIT} + 1)$ \\
+\texttt{INCOME\_PER\_PERSON}    & $\texttt{AMT\_INCOME\_TOTAL} / (\texttt{CNT\_FAM\_MEMBERS} + 1)$ \\
+\texttt{GOODS\_CREDIT\_RATIO}   & $\texttt{AMT\_GOODS\_PRICE} / (\texttt{AMT\_CREDIT} + 1)$ \\
+\bottomrule
+\end{tabular}
+\caption{Financial features created from the main table}
+\end{table}
+
+Adding 1 to the denominator avoids division by zero without distorting values for
+large denominators.
+
+\subsubsection{Time-Based Features}
+
+\begin{itemize}
+    \item \texttt{DAYS\_BIRTH\_YEARS}: client age in years (more interpretable than
+          negative days)
+    \item \texttt{DAYS\_EMPLOYED\_YEARS}: employment duration in years
+    \item \texttt{EMPLOYED\_TO\_BIRTH\_RATIO}: fraction of life spent working
+    \item \texttt{EMPLOYED\_TO\_AGE\_PCT}: employment duration / age ratio
+\end{itemize}
+
+\subsubsection{EXT\_SOURCE Combinations}
+
+Given the high predictive power of external scores, multiple combinations were created:
+
+\begin{align}
+    \texttt{EXT\_SOURCE\_MEAN} &= \tfrac{1}{3}(E_1 + E_2 + E_3) \\
+    \texttt{EXT\_SOURCE\_STD}  &= \text{std}(E_1, E_2, E_3) \\
+    \texttt{EXT\_SOURCE\_PROD} &= E_1 \cdot E_2 \cdot E_3 \\
+    \texttt{EXT12} &= E_1 \cdot E_2, \quad
+    \texttt{EXT13} = E_1 \cdot E_3, \quad
+    \texttt{EXT23} = E_2 \cdot E_3
+\end{align}
+
+The product captures non-linear interactions: a low score from any single source
+collapses the product, signaling concentrated risk.
+
+\subsection{Auxiliary Table Aggregation}
+
+For each auxiliary table, the process is:
+
+\begin{enumerate}
+    \item Create domain-specific manual features for the table
+    \item Apply statistical aggregations for numeric columns:
+          \texttt{count}, \texttt{mean}, \texttt{max}, \texttt{min}, \texttt{sum}
+    \item Apply One-Hot Encoding + aggregation for categorical columns:
+          \texttt{sum}, \texttt{mean}
+    \item Left-join to the \texttt{SK\_ID\_CURR} level
+\end{enumerate}
+
+This process is implemented in reusable functions \texttt{agg\_numeric()} and
+\texttt{agg\_categorical()} in \texttt{src/features.py}.
+
+\subsubsection{Bureau and Bureau Balance}
+
+\texttt{bureau\_balance} provides monthly history for each bureau credit entry.
+Status columns were binarized:
+
+\begin{lstlisting}[language=Python, caption={Feature engineering on bureau\_balance}]
+# C = closed, X = no loan, 1-5 = months overdue (increasing severity)
+bureau_balance['STATUS_GOOD'] = bureau_balance['STATUS'].isin(['C','X']).astype(np.int8)
+bureau_balance['STATUS_LATE'] = bureau_balance['STATUS'].isin(['1','2','3','4','5']).astype(np.int8)
+\end{lstlisting}
+
+\subsubsection{Installments Payments}
+
+\begin{itemize}
+    \item \texttt{PAYMENT\_DIFF}: amount paid $-$ amount due (positive = paid more
+          than the minimum)
+    \item \texttt{PAYMENT\_RATIO}: ratio of amount paid to amount due
+    \item \texttt{DAYS\_PAST\_DUE}: days overdue (clipped to 0 for early payments)
+    \item \texttt{PAID\_ON\_TIME}: binary on-time payment flag
+\end{itemize}
+
+\subsubsection{Credit Card Balance}
+
+\begin{equation}
+    \texttt{UTILIZATION} = \frac{\texttt{AMT\_BALANCE}}{\texttt{AMT\_CREDIT\_LIMIT\_ACTUAL} + 1}
+\end{equation}
+
+High credit utilization is a strong indicator of financial stress.
+
+\subsubsection{Previous Applications}
+
+\begin{itemize}
+    \item \texttt{APP\_CREDIT\_RATIO}: ratio of amount applied for to amount approved
+          --- captures whether clients typically request more than they receive
+    \item \texttt{DAYS\_DECISION\_YEARS}: time since last credit decision, in years
+\end{itemize}
+
+\subsection{Final Processing}
+
+After merging all tables:
+
+\begin{enumerate}
+    \item Drop columns with \textbf{more than 80\% nulls} post-merge (auxiliary tables
+          introduce many nulls for clients without history in a given product)
+    \item \textbf{One-Hot Encoding} for categorical variables with fewer than 10 unique
+          categories
+    \item \textbf{Alignment} between train and test: columns missing in test are
+          filled with 0
+    \item \textbf{Column name sanitization}: special characters replaced by \texttt{\_}
+          (required for LightGBM compatibility)
+    \item Save to \textbf{Parquet format} for efficient I/O
+\end{enumerate}
+
+The final result is a dataset with \textbf{1,042 features} and 307,511 training rows.
+
+% ══════════════════════════════════════════════════════════════
+\section{Modeling}
+
+\subsection{Algorithm Selection}
+
+\textbf{LightGBM} (Light Gradient Boosting Machine) was chosen for the following reasons:
+
+\begin{itemize}
+    \item \textbf{Efficiency with high dimensionality:} the GOSS and EFB algorithms
+          allow fast training with over 1,000 features
+    \item \textbf{Native missing value handling:} learns the best split direction for
+          missing data without imputation
+    \item \textbf{Performance on tabular data:} gradient boosting trees historically
+          outperform neural networks on tabular data with domain-engineered features
+    \item \textbf{Imbalance support:} \texttt{scale\_pos\_weight} adjusts the minority
+          class weight in gradient computation
+\end{itemize}
+
+\subsection{Hyperparameter Optimization with Optuna}
+
+Optuna implements the \textbf{TPE} (Tree-structured Parzen Estimator), a Bayesian
+optimization method that builds a probabilistic model of the hyperparameter space and
+suggests configurations with the highest probability of improvement over the current best.
+
+The tuning process used:
+\begin{itemize}
+    \item 20 trials, each evaluated with 3-fold CV
+    \item Objective metric: mean AUC-ROC across the 3 folds
+    \item Early stopping of 30 rounds per fold to speed up the search
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Search Space} & \textbf{Type} \\
+\midrule
+\texttt{learning\_rate}      & $[0.02,\; 0.15]$   & log-uniform \\
+\texttt{num\_leaves}         & $[20,\; 200]$       & integer \\
+\texttt{max\_depth}          & $[4,\; 10]$         & integer \\
+\texttt{min\_child\_samples} & $[20,\; 300]$       & integer \\
+\texttt{feature\_fraction}   & $[0.4,\; 0.9]$      & uniform \\
+\texttt{bagging\_fraction}   & $[0.4,\; 0.9]$      & uniform \\
+\texttt{bagging\_freq}       & $[1,\; 7]$          & integer \\
+\texttt{reg\_alpha}          & $[10^{-4},\; 5.0]$  & log-uniform \\
+\texttt{reg\_lambda}         & $[10^{-4},\; 5.0]$  & log-uniform \\
+\bottomrule
+\end{tabular}
+\caption{Optuna search space}
+\end{table}
+
+\subsection{Final Training with 5-Fold CV}
+
+After identifying the best hyperparameters, the final model is trained with
+\textbf{StratifiedKFold} of 5 folds, which preserves the default rate proportion in
+each fold:
+
+\begin{lstlisting}[language=Python, caption={Stratified cross-validation training}]
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+oof_preds  = np.zeros(len(X))
+test_preds = np.zeros(len(X_test))
+
+for fold, (tr_idx, val_idx) in enumerate(skf.split(X, y)):
+    model = lgb.LGBMClassifier(**BEST_PARAMS)
+    model.fit(X.iloc[tr_idx], y.iloc[tr_idx],
+              eval_set=[(X.iloc[val_idx], y.iloc[val_idx])],
+              callbacks=[lgb.early_stopping(100)])
+    oof_preds[val_idx]  = model.predict_proba(X.iloc[val_idx])[:, 1]
+    test_preds         += model.predict_proba(X_test)[:, 1] / 5
+\end{lstlisting}
+
+Test predictions are the \textbf{average} across the 5 models, reducing variance.
+
+\subsection{OOF AUC vs.\ Mean Fold AUC}
+
+The \textbf{OOF AUC} (Out-of-Fold) is computed by concatenating all out-of-fold
+predictions and calculating AUC over the entire training set at once:
+
+\begin{equation}
+    \text{AUC}_{\text{OOF}} = \text{AUC}\!\left(\mathbf{y}_{\text{train}},\;
+    \hat{\mathbf{p}}_{\text{OOF}}\right)
+\end{equation}
+
+This differs from the mean of per-fold AUCs:
+
+\begin{equation}
+    \overline{\text{AUC}}_{\text{folds}} = \frac{1}{K}
+    \sum_{k=1}^{K} \text{AUC}\!\left(\mathbf{y}^{(k)}_{\text{val}},\;
+    \hat{\mathbf{p}}^{(k)}_{\text{val}}\right)
+\end{equation}
+
+The OOF AUC is more reliable because it evaluates the \textbf{global ranking} of all
+predictions together. Individual folds may show higher AUC due to statistically more
+separable data --- the OOF metric corrects for this bias.
+
+\subsection{Experiment Tracking with MLflow}
+
+All experiments are logged in MLflow:
+\begin{itemize}
+    \item Best Optuna trial hyperparameters
+    \item Final OOF AUC and per-fold AUC
+    \item Number of features used
+\end{itemize}
+
+This enables reproducible comparison of future runs with new features or different models.
+
+% ══════════════════════════════════════════════════════════════
+\section{Engineering Best Practices}
+
+\subsection{Code Structure}
+
+The separation between notebooks and reusable code (\texttt{src/features.py}) avoids
+duplication. The functions \texttt{agg\_numeric()} and \texttt{agg\_categorical()} are
+generic --- they accept any DataFrame, primary key, and name prefix, making them
+applicable to all auxiliary tables without modification.
+
+\subsection{Memory Management}
+
+With datasets of tens of millions of rows, memory usage is critical:
+
+\begin{itemize}
+    \item \textbf{Type downcasting:} integers and floats are converted to the smallest
+          type that fits their range (\texttt{int8}, \texttt{int16}, \texttt{float32}),
+          typically achieving 40--60\% memory reduction
+    \item \textbf{Explicit garbage collection:} after each auxiliary table is processed,
+          the object is deleted and \texttt{gc.collect()} is called
+    \item \textbf{Parquet:} columnar, compressed intermediate storage instead of CSV
+\end{itemize}
+
+\subsection{Data Leakage Prevention}
+
+Train-test column alignment is performed via \texttt{pd.DataFrame.align(join=`left')}
+to ensure the test set never contains features derived from target information. When
+Target Encoding is applied, K-Fold is used to prevent the target from leaking into
+the validation fold.
+
+% ══════════════════════════════════════════════════════════════
+\section{Conclusion and Future Work}
+
+\subsection{Conclusion}
+
+This project implements a robust end-to-end pipeline for loan default prediction.
+The main technical highlights are:
+
+\begin{enumerate}
+    \item Decision-driven EDA, not merely descriptive
+    \item Feature engineering grounded in financial domain knowledge
+    \item Stratified cross-validation to handle class imbalance
+    \item Bayesian hyperparameter optimization with Optuna
+    \item Full experiment tracking with MLflow
+\end{enumerate}
+
+\subsection{Future Work}
+
+\begin{itemize}
+    \item \textbf{Stacking/Blending:} combine LightGBM with XGBoost and CatBoost to
+          further reduce variance
+    \item \textbf{Target Encoding:} apply to high-cardinality variables such as
+          \texttt{ORGANIZATION\_TYPE}
+    \item \textbf{SHAP values:} feature selection based on permutation importance to
+          remove noisy features
+    \item \textbf{Pseudo-labeling:} use high-confidence test predictions to augment
+          the training set
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════
+\appendix
+\section{Dependencies}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{ll}
+\toprule
+\textbf{Library} & \textbf{Version} \\
+\midrule
+pandas       & 2.2.2  \\
+numpy        & 1.26.4 \\
+scikit-learn & 1.4.2  \\
+lightgbm     & 4.x    \\
+optuna       & 3.6.1  \\
+mlflow       & 2.11.3 \\
+pyarrow      & 15.0.2 \\
+matplotlib   & 3.8.4  \\
+seaborn      & 0.13.2 \\
+\bottomrule
+\end{tabular}
+\caption{Main project dependencies}
+\end{table}
+
+\end{document}
